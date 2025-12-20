@@ -1,0 +1,41 @@
+name: Auto Execute Collect Subscription
+
+# 定时触发 (每天 12:00 UTC 执行)
+on:
+  schedule:
+    - cron: '0 12 * * *'
+  # 允许手动触发
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 检出代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # 设置 Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+      
+      # 安装依赖
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      
+      # 执行脚本
+      - name: Run main script
+        run: python main.py
+      
+      # 提交结果 (可选：如果程序生成了新文件)
+      - name: Commit changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add -A
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto: update subscription data $(date '+%Y-%m-%d %H:%M:%S')" && git push)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
