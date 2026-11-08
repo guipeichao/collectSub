@@ -20,6 +20,7 @@ CATEGORY_KEYS = ("机场订阅", "clash订阅", "v2订阅")
 STATE_PATH = os.path.join("sub", "state.yaml")
 MAX_FAILURES = 3
 MAX_WORKERS = 16
+CHANNEL_WORKERS = 8
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36"
 }
@@ -217,9 +218,17 @@ def main():
     logger.info("读取频道配置成功：{} 个唯一频道", len(channels))
 
     candidates = {}
-    for channel_url in channels:
-        for url in get_channel_http(channel_url):
-            candidates.setdefault(url, []).append(channel_url)
+    with ThreadPoolExecutor(max_workers=CHANNEL_WORKERS) as executor:
+        channel_futures = {executor.submit(get_channel_http, channel): channel for channel in channels}
+        for future in as_completed(channel_futures):
+            channel_url = channel_futures[future]
+            try:
+                channel_urls = future.result()
+            except Exception as exc:
+                logger.warning("{} 抓取任务异常：{}", channel_url, exc)
+                channel_urls = []
+            for url in channel_urls:
+                candidates.setdefault(url, []).append(channel_url)
 
     state = load_state()
     seed_state_from_output(state, current)
