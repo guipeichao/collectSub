@@ -4,6 +4,14 @@ name: Fetch Subscriptions Source
 on:
   workflow_dispatch:
 
+  push:
+    paths:
+      - 'main.py'
+      - 'merge_clash.py'
+      - 'config.yaml'
+      - 'requirements.txt'
+      - '.github/workflows/fetch.yaml'
+
   schedule:
     - cron: '0 */12 * * *'
   # - cron: '0 3,12 * * *'
