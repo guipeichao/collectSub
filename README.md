@@ -18,3 +18,7 @@ requirements.txt --- 依赖包
 
 文件包含 `proxies`、`proxy-groups` 和默认 `MATCH` 规则。
 
+工作流还会使用 Mihomo 测试节点延迟，并生成只保留可用节点的文件：
+
+`https://raw.githubusercontent.com/guipeichao/collectSub/main/sub/merged-tested.yaml`
+

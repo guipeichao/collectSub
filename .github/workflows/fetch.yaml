@@ -8,6 +8,7 @@ on:
     paths:
       - 'main.py'
       - 'merge_clash.py'
+      - 'test_clash.py'
       - 'config.yaml'
       - 'requirements.txt'
       - '.github/workflows/fetch.yaml'
@@ -48,6 +49,22 @@ jobs:
     - name: 执行任务
       run: |
         python ./main.py
+
+    - name: 下载 Mihomo 核心
+      run: |
+        mkdir -p .runtime
+        MIHOMO_URL=$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r '.assets[] | select(.name | test("mihomo-linux-amd64-v1-v.*\\.gz$")) | .browser_download_url' | head -n 1)
+        test -n "$MIHOMO_URL"
+        curl -fsSL "$MIHOMO_URL" | gzip -d > .runtime/mihomo
+        chmod +x .runtime/mihomo
+
+    - name: 测试节点并生成可用订阅
+      run: |
+        python -c "import yaml; p='sub/merged.yaml'; d=yaml.safe_load(open(p, encoding='utf-8')); d['external-controller']='127.0.0.1:19090'; yaml.safe_dump(d, open('.runtime/config.yaml','w',encoding='utf-8'), allow_unicode=True, sort_keys=False)"
+        .runtime/mihomo -d .runtime -f .runtime/config.yaml > .runtime/mihomo.log 2>&1 &
+        MIHOMO_PID=$!
+        trap 'kill "$MIHOMO_PID" || true' EXIT
+        python ./test_clash.py --input sub/merged.yaml --output sub/merged-tested.yaml
     - name: Commit
       run: |
         git config --global user.name "GitHub Actions"
