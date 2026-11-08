@@ -254,7 +254,11 @@ def main():
     with open(path_yaml, "w", encoding="utf-8") as handle:
         yaml.safe_dump(output, handle, allow_unicode=True, sort_keys=False)
     active_urls = [url for key in CATEGORY_KEYS for url in output[key]]
-    merged_count = write_merged_config(active_urls)
+    try:
+        merged_count = write_merged_config(active_urls)
+    except Exception as exc:
+        merged_count = 0
+        logger.exception("汇总 Clash 配置失败，保留已有 merged.yaml：{}", exc)
     save_state(state)
     logger.info("验证完成：有效 {}，失败 {}，隔离 {}，合并节点 {}", stats["ok"], stats["failed"], stats["quarantine"], merged_count)
 

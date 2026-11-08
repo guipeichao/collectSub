@@ -65,6 +65,11 @@ jobs:
         MIHOMO_PID=$!
         trap 'kill "$MIHOMO_PID" || true' EXIT
         python ./test_clash.py --input sub/merged.yaml --output sub/merged-tested.yaml
+
+    - name: 输出 Mihomo 日志
+      if: always()
+      run: |
+        test ! -f .runtime/mihomo.log || tail -n 100 .runtime/mihomo.log
     - name: Commit
       run: |
         git config --global user.name "GitHub Actions"
