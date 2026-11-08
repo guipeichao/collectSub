@@ -12,6 +12,7 @@ import yaml
 from loguru import logger
 from tqdm import tqdm
 
+from merge_clash import write_merged_config
 from pre_check import pre_check
 
 
@@ -252,8 +253,10 @@ def main():
     output["失败隔离"] = sorted(set(quarantine))
     with open(path_yaml, "w", encoding="utf-8") as handle:
         yaml.safe_dump(output, handle, allow_unicode=True, sort_keys=False)
+    active_urls = [url for key in CATEGORY_KEYS for url in output[key]]
+    merged_count = write_merged_config(active_urls)
     save_state(state)
-    logger.info("验证完成：有效 {}，失败 {}，隔离 {}", stats["ok"], stats["failed"], stats["quarantine"])
+    logger.info("验证完成：有效 {}，失败 {}，隔离 {}，合并节点 {}", stats["ok"], stats["failed"], stats["quarantine"], merged_count)
 
 
 if __name__ == "__main__":
