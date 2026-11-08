@@ -19,7 +19,7 @@ from pre_check import pre_check
 CATEGORY_KEYS = ("机场订阅", "clash订阅", "v2订阅")
 STATE_PATH = os.path.join("sub", "state.yaml")
 MAX_FAILURES = 3
-MAX_WORKERS = 16
+MAX_WORKERS = 32
 CHANNEL_WORKERS = 8
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36"
@@ -238,13 +238,22 @@ def main():
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(check_subscription, url): url for url in urls_to_check}
         for future in tqdm(as_completed(futures), total=len(futures), desc="订阅筛选"):
-            results.append(future.result())
+            url = futures[future]
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                logger.warning("验证任务异常 {}：{}", url, exc)
+                results.append({"url": url, "category": None, "ok": False, "error": str(exc)[:200]})
 
     output = {key: [] for key in CATEGORY_KEYS}
     quarantine = []
     stats = {"ok": 0, "failed": 0, "quarantine": 0}
     for result in results:
-        record = update_state(state, result, candidates)
+        try:
+            record = update_state(state, result, candidates)
+        except Exception as exc:
+            logger.warning("更新状态异常 {}：{}", result.get("url", ""), exc)
+            continue
         if result["ok"]:
             stats["ok"] += 1
         else:
