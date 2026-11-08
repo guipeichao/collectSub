@@ -1,164 +1,260 @@
-import re
-import os
-import yaml
-import threading
 import base64
+import html
+import os
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from urllib.parse import urlsplit, urlunsplit
+
 import requests
+import yaml
 from loguru import logger
 from tqdm import tqdm
-from retry import retry
 
 from pre_check import pre_check
 
-new_sub_list = []
-new_clash_list = []
-new_v2_list = []
 
-@logger.catch
-def yaml_check(path_yaml):
-    print(os.path.isfile(path_yaml))
-    if os.path.isfile(path_yaml): #存在，非第一次
-        with open(path_yaml,encoding="UTF-8") as f:
-            dict_url = yaml.load(f, Loader=yaml.FullLoader)
-    else:
-        dict_url = {
-            "机场订阅":[],
-            "clash订阅":[],
-            "v2订阅":[]
-        }
-    # with open(path_yaml, 'w',encoding="utf-8") as f:
-    #     data = yaml.dump(dict_url, f,allow_unicode=True)
-    logger.info('读取文件成功')
-    return dict_url
+CATEGORY_KEYS = ("机场订阅", "clash订阅", "v2订阅")
+STATE_PATH = os.path.join("sub", "state.yaml")
+MAX_FAILURES = 3
+MAX_WORKERS = 16
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36"
+}
+SUBSCRIPTION_HEADERS = {"User-Agent": "ClashforWindows/0.18.1"}
+URL_RE = re.compile(r"https?://[^\s<>\"']+")
+NODE_SCHEMES = ("ss://", "ssr://", "vmess://", "vless://", "trojan://", "hysteria://", "hysteria2://", "tuic://")
+TRACKING_PARAMS = {"fbclid", "gclid", "yclid", "mc_cid", "mc_eid", "tgclid"}
 
-@logger.catch
-def get_config():
-    with open('./config.yaml',encoding="UTF-8") as f:
-        data = yaml.load(f, Loader=yaml.FullLoader)
-    list_tg = data['tgchannel']
-    new_list = []
-    for url in list_tg:
-        a = url.split("/")[-1]
-        url = 'https://t.me/s/'+a
-        new_list.append(url)
-    return new_list
 
-@logger.catch
-def get_channel_http(channel_url):
+def load_yaml(path, default):
+    if not os.path.isfile(path):
+        return default
     try:
-        with requests.post(channel_url) as resp:
-            data = resp.text
-        url_list = re.findall("https?://[-A-Za-z0-9+&@#/%?=~_|!:,.;]+[-A-Za-z0-9+&@#/%=~_|]", data)  # 使用正则表达式查找订阅链接并创建列表
-        logger.info(channel_url+'\t获取成功')
-    except Exception as e:
-        logger.warning(channel_url+'\t获取失败')
-        logger.error(channel_url+e)
-        url_list = []
-    finally:
-        return url_list
-
-# @logger.catch
-# def get_channel_http(channel_url):
-#     headers = {
-#         'Referer': 'https://t.me/s/wbnet',
-#         'sec-ch-ua-mobile': '?0',
-#         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36',
-#     }
-#     try:
-#         with requests.post(channel_url,headers=headers) as resp:
-#             data = resp.text
-#         url_list = re.findall("https?://[-A-Za-z0-9+&@#/%?=~_|!:,.;]+[-A-Za-z0-9+&@#/%=~_|]", data)  # 使用正则表达式查找订阅链接并创建列表
-#         logger.info(channel_url+'\t获取成功')
-#     except Exception as e:
-#         logger.error('channel_url',e)
-#         logger.warning(channel_url+'\t获取失败')
-#         url_list = []
-#     finally:
-#         return url_list
-
-def filter_base64(text):
-    ss = ['ss://','ssr://','vmess://','trojan://']
-    for i in ss:
-        if i in text:
-            return True
-    return False
+        with open(path, encoding="utf-8") as handle:
+            value = yaml.safe_load(handle)
+        return value if value is not None else default
+    except (OSError, yaml.YAMLError) as exc:
+        logger.warning("读取 YAML 失败 {}: {}", path, exc)
+        return default
 
 
-@logger.catch
-def sub_check(url,bar):
-    headers = {'User-Agent': 'ClashforWindows/0.18.1'}
-    with thread_max_num:
-        @retry(tries=2)
-        def start_check(url):
-            res=requests.get(url,headers=headers,timeout=5)#设置5秒超时防止卡死
-            if res.status_code == 200:
-                try: #有流量信息
-                    info = res.headers['subscription-userinfo']
-                    info_num = re.findall('\d+',info)
-                    new_sub_list.append(url)
-                except:
-                    # 判断是否为clash
-                    try:
-                        u = re.findall('proxies:', res.text)[0]
-                        if u == "proxies:":
-                            new_clash_list.append(url)
-                    except:
-                        # 判断是否为v2
-                        try:
-                            # 解密base64
-                            text = res.text[:64]
-                            text = base64.b64decode(text)
-                            text = str(text)
-                            if filter_base64(text):
-                                new_v2_list.append(url)
-                        # 均不是则非订阅链接
-                        except:
-                            pass
-            else:
-                pass
+def yaml_check(path_yaml):
+    data = load_yaml(path_yaml, {})
+    result = {key: [] for key in CATEGORY_KEYS}
+    if isinstance(data, dict):
+        for key in CATEGORY_KEYS:
+            values = data.get(key, [])
+            if isinstance(values, list):
+                result[key] = [url for url in values if isinstance(url, str)]
+    logger.info("读取结果文件成功：{}", path_yaml)
+    return result
+
+
+def get_config():
+    data = load_yaml("config.yaml", {})
+    channels = data.get("tgchannel", []) if isinstance(data, dict) else []
+    result = []
+    seen = set()
+    for channel in channels:
+        if not isinstance(channel, str):
+            continue
+        name = channel.rstrip("/").split("/")[-1].strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        result.append(f"https://t.me/s/{name}")
+    return result
+
+
+def normalize_url(raw_url):
+    value = html.unescape(raw_url).strip().strip(".,;:!?)]}>")
+    if not value:
+        return None
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+        return None
+    query_parts = []
+    for item in parts.query.split("&") if parts.query else []:
+        key = item.split("=", 1)[0].lower()
+        if key in TRACKING_PARAMS or key.startswith("utm_"):
+            continue
+        query_parts.append(item)
+    return urlunsplit((parts.scheme.lower(), parts.netloc, parts.path, "&".join(query_parts), ""))
+
+
+def get_channel_http(channel_url):
+    for attempt in range(1, 4):
         try:
-            start_check(url)
-        except:
-            pass
-        bar.update(1)
+            response = requests.get(channel_url, headers=REQUEST_HEADERS, timeout=(5, 20))
+            response.raise_for_status()
+            urls = []
+            seen = set()
+            for match in URL_RE.findall(response.text):
+                url = normalize_url(match)
+                if url and url not in seen:
+                    seen.add(url)
+                    urls.append(url)
+            logger.info("{} 获取成功：候选链接 {} 条", channel_url, len(urls))
+            return urls
+        except requests.RequestException as exc:
+            if attempt == 3:
+                logger.warning("{} 获取失败：{}", channel_url, exc)
+            else:
+                logger.debug("{} 第 {} 次重试：{}", channel_url, attempt, exc)
+                time.sleep(1.5 ** attempt)
+    return []
 
-if __name__=='__main__':
+
+def contains_node_uri(text):
+    lowered = text.lower()
+    return any(scheme in lowered for scheme in NODE_SCHEMES)
+
+
+def decode_subscription_text(text):
+    compact = re.sub(r"\s+", "", text)
+    if len(compact) < 16 or not re.fullmatch(r"[A-Za-z0-9+/=_-]+", compact):
+        return ""
+    try:
+        padded = compact + "=" * (-len(compact) % 4)
+        return base64.urlsafe_b64decode(padded).decode("utf-8", errors="ignore")
+    except (ValueError, TypeError):
+        return ""
+
+
+def classify_response(response):
+    if response.status_code != 200 or not response.content:
+        return None
+    text = response.text.strip()
+    if "subscription-userinfo" in {key.lower() for key in response.headers}:
+        return "机场订阅"
+    try:
+        document = yaml.safe_load(text)
+        if isinstance(document, dict) and isinstance(document.get("proxies"), list) and document["proxies"]:
+            return "clash订阅"
+    except yaml.YAMLError:
+        pass
+    decoded = decode_subscription_text(text)
+    if contains_node_uri(text) or contains_node_uri(decoded):
+        return "v2订阅"
+    return None
+
+
+def check_subscription(url):
+    last_error = "未知错误"
+    for attempt in range(1, 3):
+        try:
+            response = requests.get(url, headers=SUBSCRIPTION_HEADERS, timeout=(5, 15), allow_redirects=True)
+            category = classify_response(response)
+            if category:
+                return {"url": url, "category": category, "ok": True, "error": ""}
+            last_error = f"无有效订阅内容（HTTP {response.status_code}）"
+        except requests.RequestException as exc:
+            last_error = str(exc)[:200]
+        if attempt == 1:
+            time.sleep(1.5 ** attempt)
+            continue
+    return {"url": url, "category": None, "ok": False, "error": last_error}
+
+
+def load_state():
+    data = load_yaml(STATE_PATH, {})
+    urls = data.get("urls", {}) if isinstance(data, dict) else {}
+    return urls if isinstance(urls, dict) else {}
+
+
+def save_state(state):
+    with open(STATE_PATH, "w", encoding="utf-8") as handle:
+        yaml.safe_dump({"urls": state}, handle, allow_unicode=True, sort_keys=True)
+
+
+def update_state(state, result, sources):
+    url = result["url"]
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    previous = state.get(url, {}) if isinstance(state.get(url), dict) else {}
+    try:
+        previous_failures = int(previous.get("failures", 0))
+    except (TypeError, ValueError):
+        previous_failures = 0
+    failures = 0 if result["ok"] else previous_failures + 1
+    record = {
+        "category": result["category"] or previous.get("category", ""),
+        "first_seen": previous.get("first_seen", now),
+        "last_checked": now,
+        "last_ok": now if result["ok"] else previous.get("last_ok", ""),
+        "failures": failures,
+        "last_error": result["error"],
+        "sources": sorted(set(previous.get("sources", [])) | set(sources.get(url, []))),
+    }
+    state[url] = record
+    return record
+
+
+def seed_state_from_output(state, output):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for category in CATEGORY_KEYS:
+        for url in output.get(category, []):
+            state.setdefault(url, {
+                "category": category,
+                "first_seen": now,
+                "last_checked": "",
+                "last_ok": "",
+                "failures": 0,
+                "last_error": "",
+                "sources": [],
+            })
+
+
+def main():
     path_yaml = pre_check()
-    dict_url = yaml_check(path_yaml)
-    # print(dict_url)
-    list_tg = get_config()
-    logger.info('读取config成功')
-    #循环获取频道订阅
-    url_list = []
-    for channel_url in list_tg:
-        temp_list = get_channel_http(channel_url)
-        url_list.extend(temp_list)
-    logger.info('开始筛选---')
-    thread_max_num = threading.Semaphore(32)  # 32线程
-    bar = tqdm(total=len(url_list), desc='订阅筛选：')
-    thread_list = []
-    for url in url_list:
-        # 为每个新URL创建线程
-        t = threading.Thread(target=sub_check, args=(url, bar))
-        # 加入线程池并启动
-        thread_list.append(t)
-        t.setDaemon(True)
-        t.start()
-    for t in thread_list:
-        t.join()
-    bar.close()
-    logger.info('筛选完成')
-    old_sub_list = dict_url['机场订阅']
-    old_clash_list = dict_url['clash订阅']
-    old_v2_list = dict_url['v2订阅']
-    new_sub_list.extend(old_sub_list)
-    new_clash_list.extend(old_clash_list)
-    new_v2_list.extend(old_v2_list)
-    new_sub_list = list(set(new_sub_list))
-    new_clash_list = list(set(new_clash_list))
-    new_v2_list = list(set(new_v2_list))
-    dict_url.update({'机场订阅':new_sub_list})
-    dict_url.update({'clash订阅': new_clash_list})
-    dict_url.update({'v2订阅': new_v2_list})
-    with open(path_yaml, 'w',encoding="utf-8") as f:
-        data = yaml.dump(dict_url, f,allow_unicode=True)
+    current = yaml_check(path_yaml)
+    channels = get_config()
+    logger.info("读取频道配置成功：{} 个唯一频道", len(channels))
+
+    candidates = {}
+    for channel_url in channels:
+        for url in get_channel_http(channel_url):
+            candidates.setdefault(url, []).append(channel_url)
+
+    state = load_state()
+    seed_state_from_output(state, current)
+    urls_to_check = sorted(set(candidates) | set(state))
+    logger.info("开始验证：{} 条唯一订阅链接", len(urls_to_check))
+    results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(check_subscription, url): url for url in urls_to_check}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="订阅筛选"):
+            results.append(future.result())
+
+    output = {key: [] for key in CATEGORY_KEYS}
+    quarantine = []
+    stats = {"ok": 0, "failed": 0, "quarantine": 0}
+    for result in results:
+        record = update_state(state, result, candidates)
+        if result["ok"]:
+            stats["ok"] += 1
+        else:
+            stats["failed"] += 1
+        if record["failures"] >= MAX_FAILURES:
+            quarantine.append(result["url"])
+            stats["quarantine"] += 1
+            continue
+        category = record.get("category")
+        if category in output:
+            output[category].append(result["url"])
+
+    for key in output:
+        output[key] = sorted(set(output[key]))
+    output["失败隔离"] = sorted(set(quarantine))
+    with open(path_yaml, "w", encoding="utf-8") as handle:
+        yaml.safe_dump(output, handle, allow_unicode=True, sort_keys=False)
+    save_state(state)
+    logger.info("验证完成：有效 {}，失败 {}，隔离 {}", stats["ok"], stats["failed"], stats["quarantine"])
+
+
+if __name__ == "__main__":
+    main()
